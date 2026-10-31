@@ -1,0 +1,57 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JLLA Budget Report Updater</title><style>
+:root{font-family:Arial,Helvetica,sans-serif;color:#202020;background:#f8e8e0}*{box-sizing:border-box}main{max-width:950px;margin:35px auto;background:white;border:1px solid #ebebeb;border-radius:15px;padding:30px;box-shadow:0 5px 22px #0002}h1{color:#991023}input{padding:12px;border:1px solid #bbb;border-radius:6px;max-width:100%}button{background:#bf1e2e;color:white;border:0;border-radius:7px;padding:12px 18px;cursor:pointer;font-weight:bold}button:disabled{opacity:.5}button.secondary{background:#f8e8e0;color:#991023}.notice{background:#fff5f1;border-left:4px solid #d32a40;padding:12px;margin:15px 0}label{display:block;font-weight:bold;margin:12px 0 5px}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:7px;text-align:left;border-bottom:1px solid #eee}td input{width:115px;padding:6px}#preview{max-height:450px;overflow:auto;border:1px solid #ddd;margin:12px 0}#error{color:#991023;white-space:pre-wrap}.small{color:#555;font-size:13px}@media(max-width:650px){main{margin:0;padding:15px}table{font-size:11px}td input{width:75px}}</style></head><body><main>
+<h1>JLLA Budget Report Updater</h1><p>For authorized JLLA administrators. Import a monthly <strong>Budget vs. Actual PDF</strong> with the same layout as the September 2026 report, review the extracted amounts, then download a new <code>budget-data.json</code> to replace the file in GitHub.</p>
+<div class="notice"><strong>Important:</strong> This page runs locally in your browser. It does not upload or publish budget information to GitHub. Anyone who knows this page URL can open it; GitHub Pages does not provide administrator access controls. Review the report and the data before publishing, and confirm JLLA permits sharing these budget figures on a public website.</div>
+<label for="budgetPdf">Monthly Budget vs. Actual report (PDF)</label><input id="budgetPdf" type="file" accept="application/pdf,.pdf"><div id="status" class="small" role="status">No report selected.</div><p id="error" role="alert"></p>
+<div id="results" hidden><label for="asOf">Report month / as-of date</label><input id="asOf" placeholder="September 2026"><p class="small">The report month appears beside all budget checks on the member form. Verify it before publishing.</p><p id="summary"></p><div id="preview"><table><thead><tr><th>Class</th><th>Account</th><th>Account name</th><th>Remaining ($) — editable</th></tr></thead><tbody id="rows"></tbody></table></div><p><button id="download">Download budget-data.json</button></p><p class="small">Upload this JSON file into the same GitHub repository folder as <code>index.html</code> and <code>voucher-template.pdf</code>, replacing the previous <code>budget-data.json</code>. Changes generally appear on GitHub Pages after deployment. The public generator does not need to be edited each month.</p></div>
+</main><script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script><script>
+'use strict';const $=id=>document.getElementById(id);let records=[];
+const currency=/^\(?\$[\d,]+(?:\.\d{2})?\)?$/;
+function parseAmount(s){return Number(s.replace(/[$,]/g,'').replace('(','-').replace(')',''))}
+function groupRows(items){const rows=[];for(const item of items){const text=(item.str||'').trim();if(!text)continue;const y=item.y;let row=rows.find(r=>Math.abs(r.y-y)<1.7);if(!row){row={y,items:[]};rows.push(row)}row.items.push(item)}rows.forEach(r=>r.items.sort((a,b)=>a.x-b.x));return rows.sort((a,b)=>a.y-b.y)}
+function parsePage(items,pageNumber){
+ const rows=groupRows(items),all=rows.flatMap(r=>r.items);
+ const expenseRow=rows.find(r=>r.items.some(i=>/\bExpenditures\b/.test(i.str))&&!r.items.some(i=>/\bTotal\b/.test(i.str))&&r.items.some(i=>i.x<190));
+ if(!expenseRow)throw Error('Page '+pageNumber+': could not find Expenditures section.');
+ const totalRow=rows.find(r=>r.y>expenseRow.y&&r.items.some(i=>/\bTotal\b/.test(i.str))&&r.items.some(i=>/\bExpenditures\b/.test(i.str)));
+ if(!totalRow)throw Error('Page '+pageNumber+': could not find Total Expenditures.');
+ const heads=all.filter(i=>i.y<expenseRow.y&&i.x>125).flatMap(i=>{const m=i.str.match(/\b([A-Z]{3}\d{3})\s*(?:-|$)/);return m?[{x:i.x,code:m[1]}]:[]}).filter((h,i,a)=>a.findIndex(x=>x.code===h.code)===i).sort((a,b)=>a.x-b.x);
+ const remain=all.filter(i=>i.y<expenseRow.y&&i.str.trim()==='Remaining').map(i=>i.x).sort((a,b)=>a-b);
+ if(!heads.length||remain.length<heads.length)throw Error('Page '+pageNumber+': class/remaining columns could not be matched. Check report layout.');
+ const parsed=[];
+ for(const row of rows.filter(r=>r.y>expenseRow.y+0.3&&r.y<totalRow.y-0.3)){
+   const firstBoundary=Math.min(180,remain[0]-65);
+   const acctItem=row.items.find(i=>i.x<firstBoundary&&/^\s*\d{4}\b/.test(i.str));if(!acctItem)continue;
+   const account=acctItem.str.match(/^\s*(\d{4})\b/)[1];
+   const accountName=row.items.filter(i=>i.x<firstBoundary).map(i=>i.str.trim()).join(' ').replace(/^\d{4}\s*/,'').trim();
+   for(let j=0;j<heads.length;j++){
+     const x=remain[j],end=j+1<remain.length?x+(remain[j+1]-x)*.36:792;
+     const matches=row.items.filter(i=>currency.test(i.str.trim())&&i.x+i.width>=x+2&&i.x+i.width<=end);
+     if(matches.length>1)throw Error('Page '+pageNumber+': ambiguous remaining amount for '+heads[j].code+' / '+account+'.');
+     if(matches.length===1){const remaining=parseAmount(matches[0].str.trim());if(!Number.isFinite(remaining))throw Error('Invalid amount in report.');parsed.push({classCode:heads[j].code,account,accountName,remaining})}
+   }
+ }
+ return parsed;
+}
+async function importPDF(file){if(!window.pdfjsLib)throw Error('PDF reader could not load. Check your internet connection.');
+ pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+ const bytes=new Uint8Array(await file.arrayBuffer());const pdf=await pdfjsLib.getDocument({data:bytes}).promise;
+ let result=[],dates=[];
+ for(let p=1;p<=pdf.numPages;p++){
+  $('status').textContent='Reading page '+p+' of '+pdf.numPages+'…';
+  const page=await pdf.getPage(p),content=await page.getTextContent();
+  const items=content.items.map(i=>({str:i.str,x:i.transform[4],y:page.view[3]-i.transform[5],width:i.width}));
+  const dateText=items.filter(i=>i.y<210).map(i=>i.str).join(' ');
+  const match=dateText.match(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*[- ](20\d{2}|\d{2})\b/i);if(match)dates.push(match[0]);
+  result.push(...parsePage(items,p));
+ }
+ if(result.length<30)throw Error('Too few expense budget lines were extracted ('+result.length+'). Do not publish this result.');
+ const keys=new Set();for(const r of result){const key=r.classCode+'|'+r.account;if(keys.has(key))throw Error('Duplicate budget entry '+key+'. Check the report layout.');keys.add(key)}
+ const months={Jan:'January',Feb:'February',Mar:'March',Apr:'April',May:'May',Jun:'June',Jul:'July',Aug:'August',Sep:'September',Oct:'October',Nov:'November',Dec:'December'};
+ const date=dates[0]||'';const m=date.match(/^([A-Za-z]+)[- ](\d{2,4})/);$('asOf').value=m?(months[m[1].slice(0,3)]||m[1])+' '+(m[2].length===2?'20'+m[2]:m[2]):'';
+ return result;
+}
+function showResults(){const tbody=$('rows');tbody.replaceChildren();records.sort((a,b)=>a.classCode.localeCompare(b.classCode)||a.account.localeCompare(b.account));for(const r of records){const tr=document.createElement('tr');for(const value of [r.classCode,r.account,r.accountName]){const td=document.createElement('td');td.textContent=value;tr.appendChild(td)}const td=document.createElement('td'),input=document.createElement('input');input.type='number';input.step='0.01';input.value=r.remaining;input.setAttribute('aria-label','Remaining '+r.classCode+' '+r.account);input.addEventListener('input',()=>r.remaining=Number(input.value));td.appendChild(input);tr.appendChild(td);tbody.appendChild(tr)}$('summary').textContent='Extracted '+records.length+' Class + Chart of Account expense balances. Review the amounts, especially any negative or zero balances, against the PDF before publishing.';$('results').hidden=false;}
+$('budgetPdf').addEventListener('change',async()=>{const file=$('budgetPdf').files[0];$('results').hidden=true;$('error').textContent='';records=[];if(!file)return;try{$('status').textContent='Reading report…';records=await importPDF(file);showResults();$('status').textContent='Extraction complete. Review and download when ready.'}catch(e){$('error').textContent=e.message||String(e);$('status').textContent='Import failed. No budget data was created.'}});
+$('download').addEventListener('click',()=>{const asOf=$('asOf').value.trim();if(!asOf){$('error').textContent='Enter the report month before downloading.';return}if(records.some(r=>!Number.isFinite(r.remaining))){$('error').textContent='Fix invalid remaining budget amounts.';return}const lines={};for(const r of records)lines[r.classCode+'|'+r.account]={remaining:r.remaining,accountName:r.accountName};const output={schemaVersion:1,asOf,source:'JLLA Budget vs. Actual — '+asOf,lines};const url=URL.createObjectURL(new Blob([JSON.stringify(output,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='budget-data.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000)});
+</script></body></html>
